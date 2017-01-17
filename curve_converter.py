@@ -22,84 +22,80 @@ bl_info = {
     }
 
 import bpy
-from bpy.props import StringProperty, BoolProperty
-bpy.types.Object.names = StringProperty(name="", default="")
+from bpy.props import StringProperty, BoolProperty, CollectionProperty
+bpy.types.Object.cc_parent_curve = StringProperty(name="", default="")
 bpy.types.Object.cc_rscale = BoolProperty(name="Respect Scale?", default=False)
 
 
 def convert_curve(self, context):
     o = context.object
-    na, jna = [], []
+    o.select = False
+    names = o.cc_parent_curve.split(",")
+    converted_names = []
 
-    if "," in o.names:
-        na = o.names.split(",")
-        del na[len(na) - 1]
-    else:
-        na.append(o.names)
-        
     # get materials names from mesh object before update
     mats = []
     for mat in o.data.materials:
         mats.append(mat.name)            
             
-    for i in na:
-        if i in bpy.data.objects:        
-            curve = bpy.data.objects[i]            
+    for name in names:
+        if name in bpy.data.objects:
+            curve = bpy.data.objects[name]
+
             if curve.type == "CURVE":
-                o.select, curve.select = False, True
+                curve.select = True
                 context.scene.objects.active = curve
                 bpy.ops.object.duplicate()               
                 bpy.ops.object.convert(target="MESH")
                 temp = context.object
 
-                # if first mesh
-                if len(na) == 1:
-                    for mat in curve.data.materials:
-                        if mat.name not in o.data.materials:
-                            o.data.materials.append(mat) 
-                    o.data = context.object.data.copy()
-                    o.select, temp.select = False, True
-                    context.scene.objects.active = temp
-                    bpy.ops.object.delete()
-                    o.select = True
-                    context.scene.objects.active = o
+                # if name == names[0]:  # if first mesh
+                #     for mat in curve.data.materials:
+                #         if mat.name not in o.data.materials:
+                #             o.data.materials.append(mat)
+                #
+                #     o.data = context.object.data
+                #     o.select, temp.select = False, True
+                #     context.scene.objects.active = temp
+                #     bpy.ops.object.delete()
+                #     o.select = True
+                #     context.scene.objects.active = o
+                # else:
+                converted_names.append(temp.name)
 
-                    if o.cc_rscale or len(na) >= 2:
-                        o.scale = curve.scale
-                else:
-                    jna.append(temp.name)
-
-                # clean up geometry
-                bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.mesh.remove_doubles(threshold=0.0001)
-                bpy.ops.mesh.normals_make_consistent()
-                bpy.ops.object.mode_set()
-
-                for mat in mats:
-                    if mat not in o.data.materials:
-                        o.data.materials.append(bpy.data.materials[mat])                    
+                # for mat in mats:
+                #     if mat not in o.data.materials:
+                #         o.data.materials.append(bpy.data.materials[mat])
             else:
-                self.report({"ERROR"}, "Object Not Curve")
+                self.report({"ERROR"}, "Curve Converter: Object Not Curve")
         else:
-            self.report({"ERROR"}, "Object Not Found")
+            self.report({"ERROR"}, "Curve Converter: Object Not Found")
 
-    # join multiple objects
-    o.select = False    
-    for i in jna:
-        temp = bpy.data.objects[jna[0]]
-        if i != jna[0]:
-            bpy.data.objects[i].select, temp.select = True, True
-            context.scene.objects.active = temp
-            bpy.ops.object.join()
-    if jna:
-        o.data = temp.data.copy()
-        temp.select = True
-        context.scene.objects.active = temp
+    # join multiple objects and update o.data
+    if converted_names:
+        for name in converted_names:
+            bpy.data.objects[name].select = True
+
+        context.scene.objects.active = bpy.data.objects[converted_names[0]]
+        bpy.ops.object.join()
+        o.data = context.object.data
         bpy.ops.object.delete()
 
-    o.select = True
-    context.scene.objects.active = o
+        o.select = True
+        context.scene.objects.active = o
+
+        # clean up geometry
+        bpy.ops.object.mode_set(mode='EDIT', toggle=False)
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.remove_doubles(threshold=0.0001)
+        bpy.ops.mesh.normals_make_consistent()
+        bpy.ops.object.mode_set()
+
+        # respect scale of curve is cc_rscale and only a single parent scale
+        if o.cc_rscale and len(converted_names) == 1:
+            o.scale = bpy.data.objects[converted_names[0]].scale
+        else:
+            o.scale = (1, 1, 1)
 
 
 class CurveConverterAdd(bpy.types.Operator):
@@ -108,44 +104,48 @@ class CurveConverterAdd(bpy.types.Operator):
     bl_options = {"UNDO"}
     
     def execute(self, context):
-        na = context.object.name
-        out = ""
-        if len(context.selected_objects) == 1: 
-            out = na
-        else:
-            for i in context.selected_objects:
-                out += i.name + ","
-        loc = list(context.object.location.copy())
-        loc[2] += 0.5
-        bpy.ops.mesh.primitive_cube_add(location=loc)
-        context.object.names = out
-        convert_curve(self, context)
+        out = []
+        highest = -1000000  # basically any value should be larger than this
+        for ob in context.selected_objects:
+            if ob.type == "CURVE":
+                out.append(ob.name)
+                if ob.location[2] > highest:
+                    highest = ob.location[2]
+
+        if out:
+            bpy.ops.mesh.primitive_cube_add()
+            context.object.cc_parent_curve = ",".join(out)
+
+            convert_curve(self, context)
+            loc = list(context.object.location)
+            loc[2] = highest + 0.5
+            context.object.location = loc
         
         return {"FINISHED"}
 
 
-class CruveConverterAddMultiple(bpy.types.Operator):
+class CurveConverterAddMultiple(bpy.types.Operator):
     bl_label = "Add Multiple Mesh Objects"
     bl_idname = "mesh.curve_convert_add_multiple"
     bl_options = {"UNDO"}
     
     def execute(self, context):
-        nas = []
+        currently_selected = []
         # get names
         for i in context.selected_objects:
-            nas.append(i.name)
+            currently_selected.append(i.name)
 
         # deselect all
         for o in context.selected_objects:
             o.select = False
 
         # use name to get objects and convert
-        for objs in nas:
-            ob = bpy.data.objects[objs]
+        for ob_name in currently_selected:
+            ob = bpy.data.objects[ob_name]
             loc = list(ob.location)
             loc[2] += 0.5
             bpy.ops.mesh.primitive_cube_add(location=loc)
-            context.object.names = objs
+            context.object.cc_parent_curve = ob_name
             convert_curve(self, context)
             
         return {"FINISHED"}
@@ -176,13 +176,16 @@ class CurveConversionUpdateAll(bpy.types.Operator):
         mode = o.mode
         bpy.ops.object.mode_set(mode="OBJECT")
         
-        na = []
+        names = []
+
         for obj in bpy.data.objects:
-            if o.name in obj.names:
-                na.append(obj.name)
+            split_names = obj.cc_parent_curve.split(",")
+            if o.name in split_names:
+                names.append(obj.name)
+
         o.select = False
         
-        for n in na:
+        for n in names:
             temp = bpy.data.objects[n]
             temp.select = True
             context.scene.objects.active = temp
@@ -190,10 +193,10 @@ class CurveConversionUpdateAll(bpy.types.Operator):
             temp.select = False
 
         # tell user number of objects updated
-        if na == 0:
-            self.report({"INFO"}, "No Objects Updated")
+        if not names:
+            self.report({"INFO"}, "Curve Converter: No Objects Updated")
         else:
-            self.report({"INFO"}, str(len(na)) + " Objects Updated")
+            self.report({"INFO"}, "Curve Converter: {} Object(s) Updated".format(len(names)))
             
         o.select = True
         context.scene.objects.active = o
@@ -215,17 +218,17 @@ class CurveConverterPanel(bpy.types.Panel):
 
         if o is not None:
             if o.type == "MESH":
-                layout.label("Curve Name:", icon="OUTLINER_OB_CURVE")
-                if "," in o.names:
-                    li = o.names.split(",")
-                    del li[len(li) - 1]
+                layout.label("Curve Name(s):", icon="OUTLINER_OB_CURVE")
 
-                    for i in li:
-                        layout.label(i)
+                names = o.cc_parent_curve.split(",")
+                if len(names) > 1:
+                    for name in names:
+                        layout.label("    " + name)
                 else:
-                    layout.prop_search(o, "names",  context.scene, "objects")
+                    layout.prop_search(o, "cc_parent_curve",  context.scene, "objects")
                     layout.prop(o, "cc_rscale", icon="MAN_SCALE")
 
+                layout.separator()
                 layout.operator("mesh.curve_convert_update", icon="FILE_REFRESH")
             elif o.type == "CURVE":
                 if context.mode not in ("EDIT_CURVE", "EDIT_MESH"):
